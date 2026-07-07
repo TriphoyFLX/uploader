@@ -14,5 +14,9 @@
   ],
   "privacy": "public",
   "playlist_id": null,
-  "category_id": "10"
+  "category_id": "10",
+  "shorts_title_template": "{artist_cap} Type Beat \"{title}\" #Shorts",
+  "shorts_description": "{artist_cap} Type Beat | Check Full Beat On My Channel\n\n{full_video_url}\n\n{shorts_hashtags}",
+  "shorts_hashtags": "#osamasontypebeat #chetypebeat #typebeat #shorts",
+  "shorts_tags": ["osamason type beat", "che type beat", "shorts"]
 }

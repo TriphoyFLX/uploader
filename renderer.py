@@ -76,3 +76,43 @@ def render_video(
 
     subprocess.run(cmd, check=True, capture_output=True, text=True)
     return output_path
+
+
+def render_shorts(
+    image_path: Path,
+    audio_path: Path,
+    output_path: Path,
+    *,
+    duration: int = 45,
+    start: int = 0,
+) -> Path:
+    """Vertical 9:16 Shorts clip (square cover centered, trimmed audio)."""
+    if shutil.which("ffmpeg") is None:
+        raise RuntimeError("FFmpeg not found. Install: brew install ffmpeg")
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    vf = (
+        "crop=min(iw\\,ih):min(iw\\,ih):(iw-min(iw\\,ih))/2:(ih-min(iw\\,ih))/2,"
+        "scale=1080:1080,"
+        "pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black"
+    )
+
+    cmd = [
+        "ffmpeg", "-y",
+        "-loop", "1",
+        "-i", str(image_path),
+        "-i", str(audio_path),
+        "-t", str(duration),
+        "-c:v", "libx264",
+        "-tune", "stillimage",
+        "-c:a", "aac",
+        "-b:a", "192k",
+        "-pix_fmt", "yuv420p",
+        "-vf", vf,
+        "-shortest",
+        str(output_path),
+    ]
+
+    subprocess.run(cmd, check=True, capture_output=True, text=True)
+    return output_path

@@ -6,17 +6,19 @@ import argparse
 import json
 import re
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 from analyzer import analyze_beat, find_audio_files, format_key, format_producers
-from renderer import find_images, render_video
+from renderer import find_images, render_shorts, render_video
 
 ROOT = Path(__file__).parent
 ARTISTS_DIR = ROOT / "artists"
 OUTPUT_DIR = ROOT / "output"
 CREDENTIALS_DIR = ROOT / "credentials"
 UPLOAD_LOG = ROOT / "uploaded.json"
+SCHEDULE_CONFIG = ROOT / "schedule_config.json"
 
 
 def load_artist_config(artist_dir: Path) -> dict:
@@ -37,6 +39,18 @@ def load_artist_config(artist_dir: Path) -> dict:
     config.setdefault("sounds_link", "instagram.com/triphoy_prod")
     config.setdefault("hashtags", f"#{artist_dir.name}typebeat #{artist_dir.name} #typebeat")
     return config
+
+
+def load_shorts_settings(config: dict) -> dict:
+    global_shorts = {}
+    if SCHEDULE_CONFIG.exists():
+        global_shorts = json.loads(SCHEDULE_CONFIG.read_text(encoding="utf-8")).get("shorts", {})
+
+    return {
+        "enabled": config.get("shorts_enabled", global_shorts.get("enabled", True)),
+        "delay_minutes": config.get("shorts_delay_minutes", global_shorts.get("delay_minutes", 3)),
+        "duration_seconds": config.get("shorts_duration_seconds", global_shorts.get("duration_seconds", 45)),
+    }
 
 
 def load_titles(artist_dir: Path, config: dict) -> list[str]:
@@ -75,7 +89,14 @@ def title_case(name: str) -> str:
     return " ".join(word.capitalize() for word in re.split(r"[\s_-]+", name))
 
 
-def fill_template(template: str, metadata, config: dict, tags_line: str) -> str:
+def fill_template(
+    template: str,
+    metadata,
+    config: dict,
+    tags_line: str,
+    *,
+    extra: dict[str, str] | None = None,
+) -> str:
     artist = config.get("artist", metadata.artist)
     title = metadata.title
 
@@ -96,7 +117,11 @@ def fill_template(template: str, metadata, config: dict, tags_line: str) -> str:
         "{sounds_link}": config.get("sounds_link", ""),
         "{tags_line}": tags_line,
         "{hashtags}": config.get("hashtags", ""),
+        "{shorts_hashtags}": config.get("shorts_hashtags", "#typebeat #shorts"),
+        "{full_video_url}": "",
     }
+    if extra:
+        replacements.update(extra)
 
     result = template
     for key, value in replacements.items():
@@ -223,7 +248,15 @@ def publish_single_beat(
     print(f"    YouTube: {youtube_title}")
 
     if dry_run:
+        shorts = load_shorts_settings(config)
+        shorts_title = fill_template(
+            config.get("shorts_title_template", '{artist_cap} Type Beat "{title}" #Shorts'),
+            metadata, config, tags_line,
+            extra={"{full_video_url}": "https://youtu.be/XXXXXXXX"},
+        )
         print("    [dry-run] Would upload and cleanup")
+        if shorts["enabled"]:
+            print(f"    [dry-run] Shorts in {shorts['delay_minutes']} min: {shorts_title}")
         return {
             "artist": artist,
             "title": title,
@@ -238,6 +271,7 @@ def publish_single_beat(
     render_video(image_path, audio_path, video_path)
 
     video_id = None
+    shorts_video_id = None
     if not skip_upload:
         from youtube import get_authenticated_service, save_upload_log, upload_video
 
@@ -264,16 +298,73 @@ def publish_single_beat(
             "uploaded_at": datetime.now(timezone.utc).isoformat(),
         })
 
+        shorts = load_shorts_settings(config)
+        if shorts["enabled"] and video_id:
+            full_url = f"https://youtu.be/{video_id}"
+            delay = shorts["delay_minutes"]
+            print(f"    Waiting {delay} min before Shorts...")
+            time.sleep(delay * 60)
+
+            shorts_path = OUTPUT_DIR / artist / f"{safe_title}_{audio_path.stem}_shorts.mp4"
+            print(f"    Rendering Shorts → {shorts_path.name}")
+            render_shorts(
+                image_path,
+                audio_path,
+                shorts_path,
+                duration=shorts["duration_seconds"],
+            )
+
+            shorts_title = fill_template(
+                config.get("shorts_title_template", '{artist_cap} Type Beat "{title}" #Shorts'),
+                metadata, config, tags_line,
+            )
+            shorts_description = fill_template(
+                config.get(
+                    "shorts_description",
+                    "{artist_cap} Type Beat | Check Full Beat On My Channel\n\n{full_video_url}\n\n{shorts_hashtags}",
+                ),
+                metadata, config, tags_line,
+                extra={"{full_video_url}": full_url},
+            )
+            shorts_tags = config.get("shorts_tags", api_tags[:3] + ["shorts"])
+
+            print(f"    Shorts title: {shorts_title}")
+            shorts_video_id = upload_video(
+                service,
+                shorts_path,
+                title=shorts_title,
+                description=shorts_description,
+                tags=shorts_tags,
+                category_id=config.get("category_id", "10"),
+                privacy=config.get("privacy", "public"),
+            )
+
+            save_upload_log(UPLOAD_LOG, {
+                "key": f"{upload_key(artist, audio_path, title)}:shorts",
+                "artist": artist,
+                "title": title,
+                "audio_file": audio_path.name,
+                "video_id": shorts_video_id,
+                "youtube_title": shorts_title,
+                "type": "shorts",
+                "full_video_id": video_id,
+                "uploaded_at": datetime.now(timezone.utc).isoformat(),
+            })
+
+            if shorts_path.exists():
+                shorts_path.unlink()
+
     archive_title(artist_dir, config, title, video_id=video_id)
     remove_first_title(artist_dir, config, title)
     print(f"    Archived title: {title}")
-    cleanup_after_publish(audio_path, image_path)
+    cleanup_after_publish(audio_path, image_path, video_path)
 
     return {
         "artist": artist,
         "title": title,
         "youtube_title": youtube_title,
         "video_id": video_id,
+        "shorts_video_id": shorts_video_id,
         "audio_file": audio_path.name,
         "image_file": image_path.name,
     }

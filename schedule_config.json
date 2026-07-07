@@ -5,5 +5,10 @@
     "osamason": 4,
     "che": 2,
     "osamason+che": 1
+  },
+  "shorts": {
+    "enabled": true,
+    "delay_minutes": 3,
+    "duration_seconds": 45
   }
 }
