@@ -1,0 +1,18 @@
+[Unit]
+Description=BeatMachine YouTube Auto Uploader
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/beatmachine
+Environment=PATH=/opt/beatmachine/.venv/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/opt/beatmachine/.venv/bin/python scheduler.py --daemon
+Restart=always
+RestartSec=30
+StandardOutput=append:/var/log/beatmachine.log
+StandardError=append:/var/log/beatmachine.log
+
+[Install]
+WantedBy=multi-user.target

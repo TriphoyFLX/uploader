@@ -1,0 +1,23 @@
+# Credentials — never commit real files
+credentials/client_secrets.json
+credentials/token.json
+scheduler_state.json
+uploaded.json
+**/archive_titles.txt
+output/
+
+# User content (upload via SFTP on server)
+artists/*/beats/*
+!artists/*/beats/.gitkeep
+artists/*/image/*
+!artists/*/image/.gitkeep
+**/preview.json
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# OS
+.DS_Store

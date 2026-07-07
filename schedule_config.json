@@ -1,0 +1,9 @@
+{
+  "publish_time": "21:00",
+  "timezone": "Europe/Moscow",
+  "weekly_quota": {
+    "osamason": 4,
+    "che": 2,
+    "osamason+che": 1
+  }
+}
