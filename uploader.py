@@ -49,7 +49,7 @@ def load_shorts_settings(config: dict) -> dict:
     return {
         "enabled": config.get("shorts_enabled", global_shorts.get("enabled", True)),
         "delay_minutes": config.get("shorts_delay_minutes", global_shorts.get("delay_minutes", 3)),
-        "duration_seconds": config.get("shorts_duration_seconds", global_shorts.get("duration_seconds", 45)),
+        "duration_seconds": config.get("shorts_duration_seconds", global_shorts.get("duration_seconds", 20)),
     }
 
 

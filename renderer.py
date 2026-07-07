@@ -83,7 +83,7 @@ def render_shorts(
     audio_path: Path,
     output_path: Path,
     *,
-    duration: int = 45,
+    duration: int = 20,
     start: int = 0,
 ) -> Path:
     """Vertical 9:16 Shorts clip (square cover centered, trimmed audio)."""

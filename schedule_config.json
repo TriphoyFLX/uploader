@@ -9,6 +9,6 @@
   "shorts": {
     "enabled": true,
     "delay_minutes": 3,
-    "duration_seconds": 45
+    "duration_seconds": 20
   }
 }
