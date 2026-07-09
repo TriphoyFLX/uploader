@@ -1,6 +1,8 @@
 # Credentials — never commit real files
 credentials/client_secrets.json
 credentials/token.json
+credentials/tiktok.json
+credentials/instagram.json
 scheduler_state.json
 uploaded.json
 **/archive_titles.txt
@@ -11,6 +13,8 @@ artists/*/beats/*
 !artists/*/beats/.gitkeep
 artists/*/image/*
 !artists/*/image/.gitkeep
+artists/*/visuals/*
+!artists/*/visuals/.gitkeep
 **/preview.json
 
 # Python

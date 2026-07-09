@@ -7,6 +7,7 @@ import subprocess
 from pathlib import Path
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
+VIDEO_EXTENSIONS = {".mp4", ".mov", ".webm", ".mkv", ".avi", ".m4v"}
 
 
 def find_images(image_dir: Path) -> list[Path]:
@@ -18,8 +19,22 @@ def find_images(image_dir: Path) -> list[Path]:
     )
 
 
+def find_visuals(visuals_dir: Path) -> list[Path]:
+    if not visuals_dir.is_dir():
+        return []
+    return sorted(
+        f for f in visuals_dir.iterdir()
+        if f.is_file() and f.suffix.lower() in VIDEO_EXTENSIONS
+    )
+
+
 def find_image(image_dir: Path) -> Path | None:
     files = find_images(image_dir)
+    return files[0] if files else None
+
+
+def find_visual(visuals_dir: Path) -> Path | None:
+    files = find_visuals(visuals_dir)
     return files[0] if files else None
 
 
@@ -51,8 +66,6 @@ def render_video(
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Center-crop to square → scale to 1080×1080 → pad to 1920×1080 (centered)
-    # Commas inside crop expressions must be escaped for ffmpeg's filter parser
     vf = (
         "crop=min(iw\\,ih):min(iw\\,ih):(iw-min(iw\\,ih))/2:(ih-min(iw\\,ih))/2,"
         "scale=1080:1080,"
@@ -84,7 +97,6 @@ def render_shorts(
     output_path: Path,
     *,
     duration: int = 20,
-    start: int = 0,
 ) -> Path:
     """Vertical 9:16 Shorts clip (square cover centered, trimmed audio)."""
     if shutil.which("ffmpeg") is None:
@@ -110,6 +122,47 @@ def render_shorts(
         "-b:a", "192k",
         "-pix_fmt", "yuv420p",
         "-vf", vf,
+        "-shortest",
+        str(output_path),
+    ]
+
+    subprocess.run(cmd, check=True, capture_output=True, text=True)
+    return output_path
+
+
+def render_shorts_visual(
+    visual_path: Path,
+    audio_path: Path,
+    output_path: Path,
+    *,
+    duration: int = 20,
+) -> Path:
+    """Vertical 9:16 clip: mute visual, loop if needed, overlay beat audio."""
+    if shutil.which("ffmpeg") is None:
+        raise RuntimeError("FFmpeg not found. Install: brew install ffmpeg")
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Mute original video audio (-an on input 0 via map), crop to 9:16, loop visual
+    vf = (
+        "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,"
+        "crop=1080:1920,setsar=1,fps=30[v]"
+    )
+
+    cmd = [
+        "ffmpeg", "-y",
+        "-stream_loop", "-1",
+        "-i", str(visual_path),
+        "-i", str(audio_path),
+        "-filter_complex", vf,
+        "-map", "[v]",
+        "-map", "1:a:0",
+        "-t", str(duration),
+        "-c:v", "libx264",
+        "-c:a", "aac",
+        "-b:a", "192k",
+        "-pix_fmt", "yuv420p",
+        "-movflags", "+faststart",
         "-shortest",
         str(output_path),
     ]

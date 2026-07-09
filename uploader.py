@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from analyzer import analyze_beat, find_audio_files, format_key, format_producers
-from renderer import find_images, render_shorts, render_video
+from renderer import find_images, find_visual, find_visuals, render_shorts, render_shorts_visual, render_video
 
 ROOT = Path(__file__).parent
 ARTISTS_DIR = ROOT / "artists"
@@ -43,13 +43,19 @@ def load_artist_config(artist_dir: Path) -> dict:
 
 def load_shorts_settings(config: dict) -> dict:
     global_shorts = {}
+    global_social = {}
     if SCHEDULE_CONFIG.exists():
-        global_shorts = json.loads(SCHEDULE_CONFIG.read_text(encoding="utf-8")).get("shorts", {})
+        data = json.loads(SCHEDULE_CONFIG.read_text(encoding="utf-8"))
+        global_shorts = data.get("shorts", {})
+        global_social = data.get("social", {})
 
     return {
         "enabled": config.get("shorts_enabled", global_shorts.get("enabled", True)),
         "delay_minutes": config.get("shorts_delay_minutes", global_shorts.get("delay_minutes", 3)),
         "duration_seconds": config.get("shorts_duration_seconds", global_shorts.get("duration_seconds", 20)),
+        "use_visuals": config.get("shorts_use_visuals", global_shorts.get("use_visuals", True)),
+        "tiktok": config.get("tiktok_enabled", global_social.get("tiktok", False)),
+        "reels": config.get("reels_enabled", global_social.get("reels", False)),
     }
 
 
@@ -180,13 +186,21 @@ def remove_first_title(artist_dir: Path, config: dict, title: str) -> None:
         save_titles(artist_dir, config, [t for t in titles if t != title])
 
 
-def cleanup_after_publish(audio_path: Path, image_path: Path, video_path: Path | None = None) -> None:
+def cleanup_after_publish(
+    audio_path: Path,
+    image_path: Path,
+    video_path: Path | None = None,
+    visual_path: Path | None = None,
+) -> None:
     if audio_path.exists():
         audio_path.unlink()
         print(f"    Deleted beat: {audio_path.name}")
     if image_path.exists():
         image_path.unlink()
         print(f"    Deleted image: {image_path.name}")
+    if visual_path and visual_path.exists():
+        visual_path.unlink()
+        print(f"    Deleted visual: {visual_path.name}")
     if video_path and video_path.exists():
         video_path.unlink()
         print(f"    Deleted video: {video_path.name}")
@@ -221,6 +235,11 @@ def publish_single_beat(
     image_path = images[0]
     title = titles[0]
 
+    visual_path = None
+    shorts_settings = load_shorts_settings(config)
+    if shorts_settings.get("use_visuals", True):
+        visual_path = find_visual(artist_dir / "visuals")
+
     metadata = analyze_beat(
         artist,
         audio_path,
@@ -235,6 +254,8 @@ def publish_single_beat(
     print(f"  [{artist}] \"{title}\"")
     print(f"    Audio: {audio_path.name}")
     print(f"    Image: {image_path.name}")
+    if visual_path:
+        print(f"    Visual: {visual_path.name} (Shorts/TikTok/Reels)")
     print(f"    BPM: {metadata.bpm} | Key: {format_key(metadata.key)}")
     print(f"    Prod: {format_producers(metadata.producers, config.get('producer', 'triphoy'))}")
 
@@ -256,7 +277,12 @@ def publish_single_beat(
         )
         print("    [dry-run] Would upload and cleanup")
         if shorts["enabled"]:
-            print(f"    [dry-run] Shorts in {shorts['delay_minutes']} min: {shorts_title}")
+            src = visual_path.name if visual_path else "cover image"
+            print(f"    [dry-run] Shorts in {shorts['delay_minutes']} min ({src}): {shorts_title}")
+            if shorts.get("tiktok"):
+                print("    [dry-run] TikTok upload after Shorts render")
+            if shorts.get("reels"):
+                print("    [dry-run] Instagram Reels upload after Shorts render")
         return {
             "artist": artist,
             "title": title,
@@ -306,13 +332,22 @@ def publish_single_beat(
             time.sleep(delay * 60)
 
             shorts_path = OUTPUT_DIR / artist / f"{safe_title}_{audio_path.stem}_shorts.mp4"
-            print(f"    Rendering Shorts → {shorts_path.name}")
-            render_shorts(
-                image_path,
-                audio_path,
-                shorts_path,
-                duration=shorts["duration_seconds"],
-            )
+            if visual_path:
+                print(f"    Rendering Shorts (visual) → {shorts_path.name}")
+                render_shorts_visual(
+                    visual_path,
+                    audio_path,
+                    shorts_path,
+                    duration=shorts["duration_seconds"],
+                )
+            else:
+                print(f"    Rendering Shorts (cover) → {shorts_path.name}")
+                render_shorts(
+                    image_path,
+                    audio_path,
+                    shorts_path,
+                    duration=shorts["duration_seconds"],
+                )
 
             shorts_title = fill_template(
                 config.get("shorts_title_template", '{artist_cap} Type Beat "{title}" #Shorts'),
@@ -348,8 +383,40 @@ def publish_single_beat(
                 "youtube_title": shorts_title,
                 "type": "shorts",
                 "full_video_id": video_id,
+                "visual_file": visual_path.name if visual_path else None,
                 "uploaded_at": datetime.now(timezone.utc).isoformat(),
             })
+
+            social_caption = fill_template(
+                config.get(
+                    "social_caption",
+                    "{artist_cap} Type Beat \"{title}\" | Full beat on YouTube\n\n{full_video_url}\n\n{shorts_hashtags}",
+                ),
+                metadata, config, tags_line,
+                extra={"{full_video_url}": full_url},
+            )
+
+            if shorts.get("tiktok"):
+                try:
+                    from tiktok import is_configured as tiktok_ready, upload_video as tiktok_upload
+                    if tiktok_ready(CREDENTIALS_DIR):
+                        print("    Uploading TikTok...")
+                        tiktok_upload(shorts_path, caption=social_caption, credentials_dir=CREDENTIALS_DIR)
+                    else:
+                        print("    TikTok skipped (no credentials/tiktok.json)")
+                except Exception as exc:
+                    print(f"    TikTok error: {exc}")
+
+            if shorts.get("reels"):
+                try:
+                    from reels import is_configured as reels_ready, upload_reel
+                    if reels_ready(CREDENTIALS_DIR):
+                        print("    Uploading Instagram Reels...")
+                        upload_reel(shorts_path, caption=social_caption, credentials_dir=CREDENTIALS_DIR)
+                    else:
+                        print("    Reels skipped (no credentials/instagram.json)")
+                except Exception as exc:
+                    print(f"    Reels error: {exc}")
 
             if shorts_path.exists():
                 shorts_path.unlink()
@@ -357,7 +424,7 @@ def publish_single_beat(
     archive_title(artist_dir, config, title, video_id=video_id)
     remove_first_title(artist_dir, config, title)
     print(f"    Archived title: {title}")
-    cleanup_after_publish(audio_path, image_path, video_path)
+    cleanup_after_publish(audio_path, image_path, video_path, visual_path)
 
     return {
         "artist": artist,

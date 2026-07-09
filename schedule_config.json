@@ -9,6 +9,11 @@
   "shorts": {
     "enabled": true,
     "delay_minutes": 3,
-    "duration_seconds": 20
+    "duration_seconds": 20,
+    "use_visuals": true
+  },
+  "social": {
+    "tiktok": true,
+    "reels": true
   }
 }
