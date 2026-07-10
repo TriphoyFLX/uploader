@@ -16,8 +16,8 @@
   "privacy": "public",
   "playlist_id": null,
   "category_id": "10",
-  "shorts_title_template": "{artist_cap} Type Beat \"{title}\" #Shorts",
+  "shorts_title_template": "{artist_cap} Type Beat \"{title}\"",
   "shorts_description": "{artist_cap} Type Beat | Check Full Beat On My Channel\n\n{full_video_url}\n\n{shorts_hashtags}",
-  "shorts_hashtags": "#chetypebeat #che #typebeat #shorts",
-  "shorts_tags": ["che type beat", "shorts", "type beat"]
+  "shorts_hashtags": "#chetypebeat #che #typebeat #encore #restinbass #emptyclip",
+  "shorts_tags": ["che type beat", "che type beat 2026", "free che type beat", "type beat"]
 }

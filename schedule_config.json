@@ -2,18 +2,19 @@
   "publish_time": "21:00",
   "timezone": "Europe/Moscow",
   "weekly_quota": {
-    "osamason": 4,
+    "osamason": 3,
     "che": 2,
+    "ninevicious": 1,
     "osamason+che": 1
   },
   "shorts": {
     "enabled": true,
     "delay_minutes": 3,
-    "duration_seconds": 20,
+    "duration_seconds": 25,
     "use_visuals": true
   },
   "social": {
-    "tiktok": true,
-    "reels": true
+    "tiktok": false,
+    "reels": false
   }
 }

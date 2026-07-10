@@ -11,7 +11,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from analyzer import analyze_beat, find_audio_files, format_key, format_producers
-from renderer import find_images, find_visual, find_visuals, render_shorts, render_shorts_visual, render_video
+from renderer import (
+    find_images,
+    pick_visual,
+    render_shorts,
+    render_shorts_visual,
+    render_video,
+    shorts_overlay_text,
+)
 
 ROOT = Path(__file__).parent
 ARTISTS_DIR = ROOT / "artists"
@@ -52,7 +59,7 @@ def load_shorts_settings(config: dict) -> dict:
     return {
         "enabled": config.get("shorts_enabled", global_shorts.get("enabled", True)),
         "delay_minutes": config.get("shorts_delay_minutes", global_shorts.get("delay_minutes", 3)),
-        "duration_seconds": config.get("shorts_duration_seconds", global_shorts.get("duration_seconds", 20)),
+        "duration_seconds": config.get("shorts_duration_seconds", global_shorts.get("duration_seconds", 25)),
         "use_visuals": config.get("shorts_use_visuals", global_shorts.get("use_visuals", True)),
         "tiktok": config.get("tiktok_enabled", global_social.get("tiktok", False)),
         "reels": config.get("reels_enabled", global_social.get("reels", False)),
@@ -199,8 +206,7 @@ def cleanup_after_publish(
         image_path.unlink()
         print(f"    Deleted image: {image_path.name}")
     if visual_path and visual_path.exists():
-        visual_path.unlink()
-        print(f"    Deleted visual: {visual_path.name}")
+        print(f"    Kept visual: {visual_path.name} (reusable)")
     if video_path and video_path.exists():
         video_path.unlink()
         print(f"    Deleted video: {video_path.name}")
@@ -238,7 +244,7 @@ def publish_single_beat(
     visual_path = None
     shorts_settings = load_shorts_settings(config)
     if shorts_settings.get("use_visuals", True):
-        visual_path = find_visual(artist_dir / "visuals")
+        visual_path = pick_visual(artist_dir / "visuals", seed=audio_path.name)
 
     metadata = analyze_beat(
         artist,
@@ -339,6 +345,10 @@ def publish_single_beat(
                     audio_path,
                     shorts_path,
                     duration=shorts["duration_seconds"],
+                    overlay_text=shorts_overlay_text(
+                        artist,
+                        display_name=config.get("artist"),
+                    ),
                 )
             else:
                 print(f"    Rendering Shorts (cover) → {shorts_path.name}")

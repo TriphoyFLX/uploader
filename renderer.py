@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
+
+from PIL import Image, ImageDraw, ImageFont
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".webm", ".mkv", ".avi", ".m4v"}
@@ -33,9 +36,80 @@ def find_image(image_dir: Path) -> Path | None:
     return files[0] if files else None
 
 
-def find_visual(visuals_dir: Path) -> Path | None:
+def shorts_overlay_text(artist_slug: str, *, display_name: str | None = None) -> str:
+    """Label for Shorts visual overlay, e.g. 'osamason type beat'."""
+    if "+" in artist_slug:
+        name = artist_slug.split("+", 1)[0].strip()
+    elif display_name:
+        name = display_name.strip()
+    else:
+        name = artist_slug.replace("_", " ").strip()
+    return f"{name.lower()} type beat"
+
+
+def _drawtext_font() -> str | None:
+    for path in (
+        "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf",
+    ):
+        if Path(path).is_file():
+            return path
+    return None
+
+
+def _load_overlay_font(size: int = 56) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+    font_path = _drawtext_font()
+    if font_path:
+        try:
+            return ImageFont.truetype(font_path, size)
+        except OSError:
+            pass
+    return ImageFont.load_default()
+
+
+def make_text_overlay_png(text: str, *, width: int = 1080) -> Path:
+    """Transparent PNG with centered label for Shorts overlay."""
+    font = _load_overlay_font()
+    stroke = 4
+    pad_y = 24
+
+    measure = Image.new("RGBA", (1, 1))
+    draw = ImageDraw.Draw(measure)
+    bbox = draw.textbbox((0, 0), text, font=font, stroke_width=stroke)
+    text_w = bbox[2] - bbox[0]
+    text_h = bbox[3] - bbox[1]
+
+    img = Image.new("RGBA", (width, text_h + pad_y * 2), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    x = (width - text_w) // 2
+    y = pad_y - bbox[1]
+    draw.text(
+        (x, y),
+        text,
+        font=font,
+        fill=(255, 255, 255, 255),
+        stroke_width=stroke,
+        stroke_fill=(0, 0, 0, 215),
+    )
+
+    overlay_path = Path(tempfile.mkstemp(suffix=".png")[1])
+    img.save(overlay_path)
+    return overlay_path
+
+
+def pick_visual(visuals_dir: Path, *, seed: str = "") -> Path | None:
+    """Pick a visual (reusable — same file can be used for many beats)."""
     files = find_visuals(visuals_dir)
-    return files[0] if files else None
+    if not files:
+        return None
+    if len(files) == 1:
+        return files[0]
+    return files[hash(seed) % len(files)]
+
+
+def find_visual(visuals_dir: Path) -> Path | None:
+    return pick_visual(visuals_dir)
 
 
 def get_audio_duration(audio_path: Path) -> float:
@@ -96,7 +170,7 @@ def render_shorts(
     audio_path: Path,
     output_path: Path,
     *,
-    duration: int = 20,
+    duration: int = 25,
 ) -> Path:
     """Vertical 9:16 Shorts clip (square cover centered, trimmed audio)."""
     if shutil.which("ffmpeg") is None:
@@ -135,37 +209,67 @@ def render_shorts_visual(
     audio_path: Path,
     output_path: Path,
     *,
-    duration: int = 20,
+    duration: int = 25,
+    overlay_text: str | None = None,
 ) -> Path:
-    """Vertical 9:16 clip: mute visual, loop if needed, overlay beat audio."""
+    """Vertical 9:16 clip: mute visual, loop if shorter than duration, overlay beat."""
     if shutil.which("ffmpeg") is None:
         raise RuntimeError("FFmpeg not found. Install: brew install ffmpeg")
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Mute original video audio (-an on input 0 via map), crop to 9:16, loop visual
-    vf = (
-        "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,"
-        "crop=1080:1920,setsar=1,fps=30[v]"
-    )
+    overlay_path: Path | None = None
+    if overlay_text:
+        overlay_path = make_text_overlay_png(overlay_text)
+        vf = (
+            "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,"
+            "crop=1080:1920,setsar=1,fps=30[base];"
+            "[2:v]format=rgba,fps=30[ovl];"
+            "[base][ovl]overlay=(W-w)/2:(H-h)/2[v]"
+        )
+        cmd = [
+            "ffmpeg", "-y",
+            "-stream_loop", "-1",
+            "-i", str(visual_path),
+            "-i", str(audio_path),
+            "-loop", "1",
+            "-i", str(overlay_path),
+            "-filter_complex", vf,
+            "-map", "[v]",
+            "-map", "1:a:0",
+            "-t", str(duration),
+            "-c:v", "libx264",
+            "-c:a", "aac",
+            "-b:a", "192k",
+            "-pix_fmt", "yuv420p",
+            "-movflags", "+faststart",
+            str(output_path),
+        ]
+    else:
+        vf = (
+            "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,"
+            "crop=1080:1920,setsar=1,fps=30[v]"
+        )
+        cmd = [
+            "ffmpeg", "-y",
+            "-stream_loop", "-1",
+            "-i", str(visual_path),
+            "-i", str(audio_path),
+            "-filter_complex", vf,
+            "-map", "[v]",
+            "-map", "1:a:0",
+            "-t", str(duration),
+            "-c:v", "libx264",
+            "-c:a", "aac",
+            "-b:a", "192k",
+            "-pix_fmt", "yuv420p",
+            "-movflags", "+faststart",
+            str(output_path),
+        ]
 
-    cmd = [
-        "ffmpeg", "-y",
-        "-stream_loop", "-1",
-        "-i", str(visual_path),
-        "-i", str(audio_path),
-        "-filter_complex", vf,
-        "-map", "[v]",
-        "-map", "1:a:0",
-        "-t", str(duration),
-        "-c:v", "libx264",
-        "-c:a", "aac",
-        "-b:a", "192k",
-        "-pix_fmt", "yuv420p",
-        "-movflags", "+faststart",
-        "-shortest",
-        str(output_path),
-    ]
-
-    subprocess.run(cmd, check=True, capture_output=True, text=True)
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, text=True)
+    finally:
+        if overlay_path:
+            overlay_path.unlink(missing_ok=True)
     return output_path

@@ -16,8 +16,8 @@
   "privacy": "public",
   "playlist_id": null,
   "category_id": "10",
-  "shorts_title_template": "{artist_cap} Type Beat \"{title}\" #Shorts",
+  "shorts_title_template": "{artist_cap} Type Beat \"{title}\"",
   "shorts_description": "{artist_cap} Type Beat | Check Full Beat On My Channel\n\n{full_video_url}\n\n{shorts_hashtags}",
-  "shorts_hashtags": "#osamasontypebeat #osamason #typebeat #shorts",
-  "shorts_tags": ["osamason type beat", "shorts", "type beat"]
+  "shorts_hashtags": "#osamasontypebeat #osamason #typebeat #psykotic #hardtrap",
+  "shorts_tags": ["osamason type beat", "osamason type beat 2026", "free osamason type beat", "type beat"]
 }

@@ -30,7 +30,7 @@ def load_schedule_config() -> dict:
     return {
         "publish_time": "21:00",
         "timezone": "Europe/Moscow",
-        "weekly_quota": {"osamason": 4, "che": 2, "osamason+che": 1},
+        "weekly_quota": {"osamason": 3, "che": 2, "ninevicious": 1, "osamason+che": 1},
     }
 
 

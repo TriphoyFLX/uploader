@@ -24,7 +24,7 @@ pip install -q --upgrade pip
 pip install -q -r requirements.txt
 
 echo "==> Creating artist folders..."
-    mkdir -p artists/{che,osamason,osamason+che}/{beats,image,visuals}
+    mkdir -p artists/{che,osamason,ninevicious,osamason+che}/{beats,image,visuals}
 mkdir -p credentials output
 
 echo "==> Installing systemd service..."
