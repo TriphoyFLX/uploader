@@ -9,7 +9,7 @@
   },
   "shorts": {
     "enabled": true,
-    "interval_hours": 2,
+    "interval_hours": 5,
     "delay_minutes": 3,
     "duration_seconds": 25,
     "use_visuals": true,
