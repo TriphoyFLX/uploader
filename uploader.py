@@ -13,6 +13,7 @@ from pathlib import Path
 from analyzer import analyze_beat, find_audio_files, format_key, format_producers
 from renderer import (
     find_images,
+    find_visuals,
     pick_visual,
     render_shorts,
     render_shorts_visual,
@@ -58,9 +59,14 @@ def load_shorts_settings(config: dict) -> dict:
 
     return {
         "enabled": config.get("shorts_enabled", global_shorts.get("enabled", True)),
+        "interval_hours": config.get("shorts_interval_hours", global_shorts.get("interval_hours", 2)),
         "delay_minutes": config.get("shorts_delay_minutes", global_shorts.get("delay_minutes", 3)),
         "duration_seconds": config.get("shorts_duration_seconds", global_shorts.get("duration_seconds", 25)),
         "use_visuals": config.get("shorts_use_visuals", global_shorts.get("use_visuals", True)),
+        "alternate_visual_cover": config.get(
+            "shorts_alternate_visual_cover",
+            global_shorts.get("alternate_visual_cover", True),
+        ),
         "tiktok": config.get("tiktok_enabled", global_social.get("tiktok", False)),
         "reels": config.get("reels_enabled", global_social.get("reels", False)),
     }
@@ -212,6 +218,355 @@ def cleanup_after_publish(
         print(f"    Deleted video: {video_path.name}")
 
 
+def find_full_video_url(artist: str, audio_path: Path) -> str:
+    if not UPLOAD_LOG.exists():
+        return ""
+    for entry in reversed(json.loads(UPLOAD_LOG.read_text())):
+        if entry.get("type") in ("shorts", "shorts_interval"):
+            continue
+        if entry.get("artist") == artist and entry.get("audio_file") == audio_path.name:
+            video_id = entry.get("video_id")
+            if video_id:
+                return f"https://youtu.be/{video_id}"
+    return ""
+
+
+def render_shorts_clip(
+    *,
+    artist: str,
+    audio_path: Path,
+    image_path: Path,
+    output_path: Path,
+    config: dict,
+    shorts: dict,
+    visual_path: Path | None = None,
+    use_visual: bool = False,
+) -> str:
+    """Render Shorts clip. Returns mode used: 'visual' or 'cover'."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    if use_visual and visual_path:
+        print(f"    Rendering Shorts (visual) → {output_path.name}")
+        render_shorts_visual(
+            visual_path,
+            audio_path,
+            output_path,
+            duration=shorts["duration_seconds"],
+            overlay_text=shorts_overlay_text(
+                artist,
+                display_name=config.get("artist"),
+            ),
+        )
+        return "visual"
+
+    print(f"    Rendering Shorts (cover) → {output_path.name}")
+    render_shorts(
+        image_path,
+        audio_path,
+        output_path,
+        duration=shorts["duration_seconds"],
+    )
+    return "cover"
+
+
+def upload_shorts_clip(
+    *,
+    artist_dir: Path,
+    audio_path: Path,
+    image_path: Path | None,
+    title: str,
+    metadata,
+    config: dict,
+    tags_line: str,
+    api_tags: list[str],
+    shorts: dict,
+    service,
+    full_video_url: str = "",
+    visual_path: Path | None = None,
+    use_visual: bool = False,
+    log_type: str = "shorts",
+    log_key_suffix: str = "shorts",
+    full_video_id: str | None = None,
+) -> dict | None:
+    artist = artist_dir.name
+    safe_title = re.sub(r'[^\w\-]', '_', title)
+    shorts_path = OUTPUT_DIR / artist / f"{safe_title}_{audio_path.stem}_{log_key_suffix}.mp4"
+
+    if not use_visual and not image_path:
+        raise ValueError("Cover Shorts require image_path")
+
+    mode = render_shorts_clip(
+        artist=artist,
+        audio_path=audio_path,
+        image_path=image_path,
+        output_path=shorts_path,
+        config=config,
+        shorts=shorts,
+        visual_path=visual_path,
+        use_visual=use_visual,
+    )
+
+    if full_video_url:
+        description_template = config.get(
+            "shorts_description",
+            "{artist_cap} Type Beat | Check Full Beat On My Channel\n\n{full_video_url}\n\n{shorts_hashtags}",
+        )
+    else:
+        description_template = config.get(
+            "shorts_interval_description",
+            "{artist_cap} Type Beat \"{title}\"\n\n{shorts_hashtags}",
+        )
+
+    shorts_title = fill_template(
+        config.get("shorts_title_template", '{artist_cap} Type Beat "{title}" #Shorts'),
+        metadata, config, tags_line,
+    )
+    shorts_description = fill_template(
+        description_template,
+        metadata, config, tags_line,
+        extra={"{full_video_url}": full_video_url},
+    )
+    shorts_tags = config.get("shorts_tags", api_tags[:3] + ["shorts"])
+
+    print(f"    Shorts title: {shorts_title}")
+    from youtube import save_upload_log, upload_video
+
+    shorts_video_id = upload_video(
+        service,
+        shorts_path,
+        title=shorts_title,
+        description=shorts_description,
+        tags=shorts_tags,
+        category_id=config.get("category_id", "10"),
+        privacy=config.get("privacy", "public"),
+    )
+
+    save_upload_log(UPLOAD_LOG, {
+        "key": f"{upload_key(artist, audio_path, title)}:{log_key_suffix}",
+        "artist": artist,
+        "title": title,
+        "audio_file": audio_path.name,
+        "video_id": shorts_video_id,
+        "youtube_title": shorts_title,
+        "type": log_type,
+        "mode": mode,
+        "full_video_id": full_video_id,
+        "visual_file": visual_path.name if mode == "visual" and visual_path else None,
+        "uploaded_at": datetime.now(timezone.utc).isoformat(),
+    })
+
+    if full_video_url:
+        social_caption = fill_template(
+            config.get(
+                "social_caption",
+                "{artist_cap} Type Beat \"{title}\" | Full beat on YouTube\n\n{full_video_url}\n\n{shorts_hashtags}",
+            ),
+            metadata, config, tags_line,
+            extra={"{full_video_url}": full_video_url},
+        )
+    else:
+        social_caption = fill_template(
+            config.get(
+                "social_interval_caption",
+                "{artist_cap} Type Beat \"{title}\"\n\n{shorts_hashtags}",
+            ),
+            metadata, config, tags_line,
+        )
+
+    if shorts.get("tiktok"):
+        try:
+            from tiktok import is_configured as tiktok_ready, upload_video as tiktok_upload
+            if tiktok_ready(CREDENTIALS_DIR):
+                print("    Uploading TikTok...")
+                tiktok_upload(shorts_path, caption=social_caption, credentials_dir=CREDENTIALS_DIR)
+            else:
+                print("    TikTok skipped (no credentials/tiktok.json)")
+        except Exception as exc:
+            print(f"    TikTok error: {exc}")
+
+    if shorts.get("reels"):
+        try:
+            from reels import is_configured as reels_ready, upload_reel
+            if reels_ready(CREDENTIALS_DIR):
+                print("    Uploading Instagram Reels...")
+                upload_reel(shorts_path, caption=social_caption, credentials_dir=CREDENTIALS_DIR)
+            else:
+                print("    Reels skipped (no credentials/instagram.json)")
+        except Exception as exc:
+            print(f"    Reels error: {exc}")
+
+    if shorts_path.exists():
+        shorts_path.unlink()
+
+    return {
+        "video_id": shorts_video_id,
+        "title": shorts_title,
+        "mode": mode,
+    }
+
+
+def artist_can_shorts(artist_name: str, mode: str) -> bool:
+    artist_dir = ARTISTS_DIR / artist_name
+    if not artist_dir.is_dir():
+        return False
+    config = load_artist_config(artist_dir)
+    has_beats = bool(find_audio_files(artist_dir / "beats"))
+    has_titles = bool(load_titles(artist_dir, config))
+    if not (has_beats and has_titles):
+        return False
+    if mode == "visual":
+        return bool(find_visuals(artist_dir / "visuals"))
+    return bool(find_images(artist_dir / "image"))
+
+
+def list_shorts_artists() -> list[str]:
+    if not ARTISTS_DIR.is_dir():
+        return []
+    artists = sorted(d.name for d in ARTISTS_DIR.iterdir() if d.is_dir())
+    return [
+        name for name in artists
+        if artist_can_shorts(name, "visual") or artist_can_shorts(name, "cover")
+    ]
+
+
+def pick_interval_shorts_target(
+    *,
+    artist_index: int,
+    publish_count: int,
+    prefer_visual: bool,
+    alternate: bool,
+) -> tuple[str, str, int] | None:
+    artists = list_shorts_artists()
+    if not artists:
+        return None
+
+    preferred_mode = "visual" if prefer_visual else "cover"
+    start = artist_index % len(artists)
+
+    for offset in range(len(artists)):
+        idx = (start + offset) % len(artists)
+        artist = artists[idx]
+        if artist_can_shorts(artist, preferred_mode):
+            return artist, preferred_mode, idx
+        fallback = "cover" if preferred_mode == "visual" else "visual"
+        if artist_can_shorts(artist, fallback):
+            return artist, fallback, idx
+
+    return None
+
+
+def publish_interval_shorts(
+    *,
+    artist_index: int = 0,
+    publish_count: int = 0,
+    prefer_visual: bool = True,
+    dry_run: bool = False,
+    use_audio_analysis: bool = False,
+) -> dict | None:
+    """Upload a Shorts clip every N hours — rotates artists and visual/cover."""
+    global_shorts = load_shorts_settings({})
+    if not global_shorts["enabled"]:
+        return None
+
+    target = pick_interval_shorts_target(
+        artist_index=artist_index,
+        publish_count=publish_count,
+        prefer_visual=prefer_visual,
+        alternate=global_shorts.get("alternate_visual_cover", True),
+    )
+    if not target:
+        print("  No content ready for interval Shorts")
+        return None
+
+    artist, mode, picked_index = target
+    artist_dir = ARTISTS_DIR / artist
+    config = load_artist_config(artist_dir)
+    shorts = load_shorts_settings(config)
+
+    audio_files = find_audio_files(artist_dir / "beats")
+    images = find_images(artist_dir / "image")
+    titles = load_titles(artist_dir, config)
+    if not audio_files or not titles:
+        return None
+
+    slot = publish_count
+    audio_path = audio_files[slot % len(audio_files)]
+    title = titles[slot % len(titles)]
+    image_path = images[slot % len(images)] if images else None
+
+    visual_path = None
+    if mode == "visual":
+        visual_path = pick_visual(
+            artist_dir / "visuals",
+            seed=f"{artist}:{slot}:{audio_path.name}",
+        )
+        if not visual_path:
+            if not image_path:
+                return None
+            mode = "cover"
+    elif not image_path:
+        return None
+
+    metadata = analyze_beat(
+        artist,
+        audio_path,
+        title=title,
+        use_audio_analysis=use_audio_analysis,
+    )
+    tags_line = load_tags_line(artist_dir, config)
+    api_tags = config.get("tags", [])
+    full_video_url = find_full_video_url(artist, audio_path)
+
+    print(f"  [{artist}] interval Shorts \"{title}\" ({mode})")
+    print(f"    Audio: {audio_path.name}")
+    if mode == "visual" and visual_path:
+        print(f"    Visual: {visual_path.name}")
+    elif image_path:
+        print(f"    Cover: {image_path.name}")
+
+    if dry_run:
+        print("    [dry-run] Would upload interval Shorts (files kept)")
+        return {
+            "artist": artist,
+            "title": title,
+            "mode": mode,
+            "artist_index": picked_index,
+            "next_prefer_visual": not prefer_visual if shorts.get("alternate_visual_cover", True) else prefer_visual,
+        }
+
+    from youtube import get_authenticated_service
+
+    service = get_authenticated_service(CREDENTIALS_DIR)
+    result = upload_shorts_clip(
+        artist_dir=artist_dir,
+        audio_path=audio_path,
+        image_path=image_path,
+        title=title,
+        metadata=metadata,
+        config=config,
+        tags_line=tags_line,
+        api_tags=api_tags,
+        shorts=shorts,
+        service=service,
+        full_video_url=full_video_url,
+        visual_path=visual_path,
+        use_visual=mode == "visual",
+        log_type="shorts_interval",
+        log_key_suffix=f"shorts_interval_{slot}",
+    )
+    if not result:
+        return None
+
+    print(f"    Done: {result['title']} ({result['mode']})")
+    return {
+        "artist": artist,
+        "title": title,
+        "mode": result["mode"],
+        "shorts_video_id": result["video_id"],
+        "artist_index": picked_index,
+        "next_prefer_visual": not prefer_visual if shorts.get("alternate_visual_cover", True) else prefer_visual,
+    }
+
+
 def publish_single_beat(
     artist_dir: Path,
     *,
@@ -337,99 +692,27 @@ def publish_single_beat(
             print(f"    Waiting {delay} min before Shorts...")
             time.sleep(delay * 60)
 
-            shorts_path = OUTPUT_DIR / artist / f"{safe_title}_{audio_path.stem}_shorts.mp4"
-            if visual_path:
-                print(f"    Rendering Shorts (visual) → {shorts_path.name}")
-                render_shorts_visual(
-                    visual_path,
-                    audio_path,
-                    shorts_path,
-                    duration=shorts["duration_seconds"],
-                    overlay_text=shorts_overlay_text(
-                        artist,
-                        display_name=config.get("artist"),
-                    ),
-                )
-            else:
-                print(f"    Rendering Shorts (cover) → {shorts_path.name}")
-                render_shorts(
-                    image_path,
-                    audio_path,
-                    shorts_path,
-                    duration=shorts["duration_seconds"],
-                )
-
-            shorts_title = fill_template(
-                config.get("shorts_title_template", '{artist_cap} Type Beat "{title}" #Shorts'),
-                metadata, config, tags_line,
+            use_visual = bool(visual_path and shorts.get("use_visuals", True))
+            shorts_result = upload_shorts_clip(
+                artist_dir=artist_dir,
+                audio_path=audio_path,
+                image_path=image_path,
+                title=title,
+                metadata=metadata,
+                config=config,
+                tags_line=tags_line,
+                api_tags=api_tags,
+                shorts=shorts,
+                service=service,
+                full_video_url=full_url,
+                visual_path=visual_path,
+                use_visual=use_visual,
+                log_type="shorts",
+                log_key_suffix="shorts",
+                full_video_id=video_id,
             )
-            shorts_description = fill_template(
-                config.get(
-                    "shorts_description",
-                    "{artist_cap} Type Beat | Check Full Beat On My Channel\n\n{full_video_url}\n\n{shorts_hashtags}",
-                ),
-                metadata, config, tags_line,
-                extra={"{full_video_url}": full_url},
-            )
-            shorts_tags = config.get("shorts_tags", api_tags[:3] + ["shorts"])
-
-            print(f"    Shorts title: {shorts_title}")
-            shorts_video_id = upload_video(
-                service,
-                shorts_path,
-                title=shorts_title,
-                description=shorts_description,
-                tags=shorts_tags,
-                category_id=config.get("category_id", "10"),
-                privacy=config.get("privacy", "public"),
-            )
-
-            save_upload_log(UPLOAD_LOG, {
-                "key": f"{upload_key(artist, audio_path, title)}:shorts",
-                "artist": artist,
-                "title": title,
-                "audio_file": audio_path.name,
-                "video_id": shorts_video_id,
-                "youtube_title": shorts_title,
-                "type": "shorts",
-                "full_video_id": video_id,
-                "visual_file": visual_path.name if visual_path else None,
-                "uploaded_at": datetime.now(timezone.utc).isoformat(),
-            })
-
-            social_caption = fill_template(
-                config.get(
-                    "social_caption",
-                    "{artist_cap} Type Beat \"{title}\" | Full beat on YouTube\n\n{full_video_url}\n\n{shorts_hashtags}",
-                ),
-                metadata, config, tags_line,
-                extra={"{full_video_url}": full_url},
-            )
-
-            if shorts.get("tiktok"):
-                try:
-                    from tiktok import is_configured as tiktok_ready, upload_video as tiktok_upload
-                    if tiktok_ready(CREDENTIALS_DIR):
-                        print("    Uploading TikTok...")
-                        tiktok_upload(shorts_path, caption=social_caption, credentials_dir=CREDENTIALS_DIR)
-                    else:
-                        print("    TikTok skipped (no credentials/tiktok.json)")
-                except Exception as exc:
-                    print(f"    TikTok error: {exc}")
-
-            if shorts.get("reels"):
-                try:
-                    from reels import is_configured as reels_ready, upload_reel
-                    if reels_ready(CREDENTIALS_DIR):
-                        print("    Uploading Instagram Reels...")
-                        upload_reel(shorts_path, caption=social_caption, credentials_dir=CREDENTIALS_DIR)
-                    else:
-                        print("    Reels skipped (no credentials/instagram.json)")
-                except Exception as exc:
-                    print(f"    Reels error: {exc}")
-
-            if shorts_path.exists():
-                shorts_path.unlink()
+            if shorts_result:
+                shorts_video_id = shorts_result["video_id"]
 
     archive_title(artist_dir, config, title, video_id=video_id)
     remove_first_title(artist_dir, config, title)

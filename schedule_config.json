@@ -9,9 +9,11 @@
   },
   "shorts": {
     "enabled": true,
+    "interval_hours": 2,
     "delay_minutes": 3,
     "duration_seconds": 25,
-    "use_visuals": true
+    "use_visuals": true,
+    "alternate_visual_cover": true
   },
   "social": {
     "tiktok": false,

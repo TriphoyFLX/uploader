@@ -1,4 +1,4 @@
-"""Daily auto-publisher: 21:00 MSK, weekly quotas, cleanup after upload."""
+"""Auto-publisher: daily full videos + Shorts every N hours."""
 
 from __future__ import annotations
 
@@ -14,8 +14,11 @@ from analyzer import find_audio_files
 from renderer import find_images
 from uploader import (
     ARTISTS_DIR,
+    list_shorts_artists,
     load_artist_config,
+    load_shorts_settings,
     load_titles,
+    publish_interval_shorts,
     publish_single_beat,
 )
 
@@ -31,6 +34,7 @@ def load_schedule_config() -> dict:
         "publish_time": "21:00",
         "timezone": "Europe/Moscow",
         "weekly_quota": {"osamason": 3, "che": 2, "ninevicious": 1, "osamason+che": 1},
+        "shorts": {"enabled": True, "interval_hours": 2, "delay_minutes": 3},
     }
 
 
@@ -42,6 +46,12 @@ def load_state() -> dict:
         "weekly_published": {},
         "last_publish_date": None,
         "history": [],
+        "shorts": {
+            "last_publish_at": None,
+            "artist_index": 0,
+            "use_visual_next": True,
+            "publish_count": 0,
+        },
     }
 
 
@@ -64,6 +74,22 @@ def reset_week_if_needed(state: dict, now: datetime) -> None:
     if state.get("week_id") != week_id:
         state["week_id"] = week_id
         state["weekly_published"] = {}
+
+
+def get_shorts_state(state: dict) -> dict:
+    shorts = state.setdefault("shorts", {})
+    shorts.setdefault("last_publish_at", None)
+    shorts.setdefault("artist_index", 0)
+    shorts.setdefault("use_visual_next", True)
+    shorts.setdefault("publish_count", 0)
+    return shorts
+
+
+def mark_shorts_published(state: dict, now: datetime) -> None:
+    shorts = get_shorts_state(state)
+    shorts["last_publish_at"] = now.isoformat()
+    shorts["publish_count"] = shorts.get("publish_count", 0) + 1
+    state["shorts"] = shorts
 
 
 def artist_is_ready(artist_name: str) -> bool:
@@ -96,7 +122,6 @@ def pick_artist(state: dict, config: dict) -> str | None:
     if not ready:
         return None
 
-    # Prefer artists with remaining weekly quota (highest remaining first)
     candidates: list[tuple[int, str]] = []
     for artist, limit in quota.items():
         if artist not in ready:
@@ -109,12 +134,10 @@ def pick_artist(state: dict, config: dict) -> str | None:
         candidates.sort(reverse=True)
         return candidates[0][1]
 
-    # Quota filled for scheduled artists — still publish if content exists
     for artist in quota:
         if artist in ready:
             return artist
 
-    # Any ready artist not in quota map
     return next(iter(sorted(ready)))
 
 
@@ -124,6 +147,34 @@ def next_publish_datetime(now: datetime, publish_time: str) -> datetime:
     if now >= target:
         target += timedelta(days=1)
     return target
+
+
+def parse_state_time(value: str | None, tz: ZoneInfo) -> datetime | None:
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=tz)
+    return dt.astimezone(tz)
+
+
+def next_shorts_datetime(now: datetime, state: dict, config: dict) -> datetime | None:
+    shorts_cfg = load_shorts_settings(config)
+    if not shorts_cfg.get("enabled"):
+        return None
+
+    interval = max(1, int(shorts_cfg.get("interval_hours", 2)))
+    tz = ZoneInfo(config.get("timezone", "Europe/Moscow"))
+    shorts_state = get_shorts_state(state)
+    last_at = parse_state_time(shorts_state.get("last_publish_at"), tz)
+
+    if last_at is None:
+        return now
+
+    return last_at + timedelta(hours=interval)
 
 
 def already_published_today(state: dict, today: str) -> bool:
@@ -168,18 +219,84 @@ def run_publish_cycle(*, dry_run: bool = False) -> bool:
             "title": result["title"],
             "youtube_title": result["youtube_title"],
             "video_id": result.get("video_id"),
+            "type": "full",
         })
-        # keep last 100 entries
         state["history"] = state["history"][-100:]
+
+        if result.get("shorts_video_id"):
+            mark_shorts_published(state, moscow_now())
+            shorts = get_shorts_state(state)
+            shorts["artist_index"] = (shorts.get("artist_index", 0) + 1) % max(len(list_shorts_artists()), 1)
+            if load_shorts_settings(config).get("alternate_visual_cover", True):
+                shorts["use_visual_next"] = not shorts.get("use_visual_next", True)
+            state["shorts"] = shorts
 
     save_state(state)
     print(f"  Done: {result['youtube_title']}")
     return True
 
 
-def wait_until_publish_time() -> None:
+def run_shorts_cycle(*, dry_run: bool = False) -> bool:
+    config = load_schedule_config()
+    state = load_state()
+    now = moscow_now()
+    reset_week_if_needed(state, now)
+
+    shorts_cfg = load_shorts_settings(config)
+    if not shorts_cfg.get("enabled"):
+        return False
+
+    shorts_state = get_shorts_state(state)
+    print(
+        f"\n[{now.strftime('%Y-%m-%d %H:%M MSK')}] Interval Shorts "
+        f"(every {shorts_cfg.get('interval_hours', 2)}h)"
+    )
+
+    result = publish_interval_shorts(
+        artist_index=shorts_state.get("artist_index", 0),
+        publish_count=shorts_state.get("publish_count", 0),
+        prefer_visual=shorts_state.get("use_visual_next", True),
+        dry_run=dry_run,
+        use_audio_analysis=False,
+    )
+
+    if not result:
+        save_state(state)
+        return False
+
+    if not dry_run:
+        mark_shorts_published(state, now)
+        shorts_state["artist_index"] = result.get("artist_index", 0) + 1
+        shorts_state["use_visual_next"] = result.get(
+            "next_prefer_visual",
+            shorts_state.get("use_visual_next", True),
+        )
+        state["shorts"] = shorts_state
+        state.setdefault("history", []).append({
+            "date": now.strftime("%Y-%m-%d %H:%M"),
+            "artist": result["artist"],
+            "title": result["title"],
+            "mode": result.get("mode"),
+            "video_id": result.get("shorts_video_id"),
+            "type": "shorts_interval",
+        })
+        state["history"] = state["history"][-100:]
+
+    save_state(state)
+    print(f"  Done: {result.get('title')} ({result.get('mode')})")
+    return True
+
+
+def seconds_until(target: datetime | None, now: datetime) -> int | None:
+    if target is None:
+        return None
+    return max(1, int((target - now).total_seconds()))
+
+
+def daemon_loop() -> None:
     config = load_schedule_config()
     publish_time = config.get("publish_time", "21:00")
+    shorts_cfg = load_shorts_settings(config)
 
     while True:
         now = moscow_now()
@@ -188,36 +305,55 @@ def wait_until_publish_time() -> None:
         reset_week_if_needed(state, now)
 
         hour, minute = map(int, publish_time.split(":"))
-        target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-
-        if not already_published_today(state, today) and now >= target:
+        daily_target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if already_published_today(state, today):
+            daily_target = next_publish_datetime(now, publish_time)
+        elif now < daily_target:
+            pass
+        elif not already_published_today(state, today):
             print(f"\n{'='*50}")
             print(f"Scheduled publish triggered at {now.strftime('%Y-%m-%d %H:%M MSK')}")
             run_publish_cycle()
-            # after publish, wait until tomorrow
             time.sleep(60)
             continue
 
-        if already_published_today(state, today):
-            target = next_publish_datetime(now, publish_time)
-        elif now < target:
-            pass  # target is today 21:00
-        else:
-            target = next_publish_datetime(now, publish_time)
+        shorts_due = False
+        if shorts_cfg.get("enabled"):
+            next_shorts = next_shorts_datetime(now, state, config)
+            if next_shorts is None or now >= next_shorts:
+                print(f"\n{'='*50}")
+                print(f"Interval Shorts triggered at {now.strftime('%Y-%m-%d %H:%M MSK')}")
+                run_shorts_cycle()
+                time.sleep(30)
+                continue
 
-        wait_seconds = max(1, int((target - now).total_seconds()))
+        daily_wait = seconds_until(daily_target, now)
+        next_shorts = next_shorts_datetime(now, state, config)
+        shorts_wait = seconds_until(next_shorts, now)
+
+        waits = [w for w in (daily_wait, shorts_wait) if w is not None]
+        wait_seconds = min(waits) if waits else 300
+        wait_seconds = min(wait_seconds, 300)
+
+        parts = []
+        if daily_wait is not None:
+            parts.append(f"full video {daily_target.strftime('%Y-%m-%d %H:%M MSK')}")
+        if shorts_wait is not None and next_shorts is not None:
+            parts.append(f"Shorts {next_shorts.strftime('%Y-%m-%d %H:%M MSK')}")
+        next_label = " | ".join(parts) if parts else "idle"
+
         print(
-            f"[{now.strftime('%H:%M MSK')}] Next publish: "
-            f"{target.strftime('%Y-%m-%d %H:%M MSK')} "
+            f"[{now.strftime('%H:%M MSK')}] Next: {next_label} "
             f"(in {wait_seconds // 3600}h {(wait_seconds % 3600) // 60}m)"
         )
-        time.sleep(min(wait_seconds, 300))  # check every 5 min max
+        time.sleep(wait_seconds)
 
 
 def main():
-    parser = argparse.ArgumentParser(description="BeatMachine Scheduler — daily auto-publish")
-    parser.add_argument("--daemon", action="store_true", help="Run forever, publish daily at 21:00 MSK")
-    parser.add_argument("--now", action="store_true", help="Publish one beat immediately (test)")
+    parser = argparse.ArgumentParser(description="BeatMachine Scheduler — daily videos + interval Shorts")
+    parser.add_argument("--daemon", action="store_true", help="Run forever")
+    parser.add_argument("--now", action="store_true", help="Publish one full beat immediately")
+    parser.add_argument("--shorts-now", action="store_true", help="Publish one interval Shorts immediately")
     parser.add_argument("--dry-run", action="store_true", help="Preview without uploading/deleting")
     parser.add_argument("--status", action="store_true", help="Show schedule state")
     args = parser.parse_args()
@@ -227,33 +363,53 @@ def main():
         state = load_state()
         now = moscow_now()
         reset_week_if_needed(state, now)
-        print(f"Time now:    {now.strftime('%Y-%m-%d %H:%M MSK')}")
-        print(f"Publish at:  {config.get('publish_time')} MSK")
-        print(f"Week:        {state.get('week_id', current_week_id(now))}")
-        print(f"Last publish:{state.get('last_publish_date', 'never')}")
+        shorts_cfg = load_shorts_settings(config)
+        shorts_state = get_shorts_state(state)
+        next_shorts = next_shorts_datetime(now, state, config)
+
+        print(f"Time now:     {now.strftime('%Y-%m-%d %H:%M MSK')}")
+        print(f"Full video:   {config.get('publish_time')} MSK (daily)")
+        print(f"Shorts:       every {shorts_cfg.get('interval_hours', 2)}h")
+        print(f"Shorts delay: {shorts_cfg.get('delay_minutes', 3)} min after full video")
+        print(f"Shorts mode:  alternate visual/cover = {shorts_cfg.get('alternate_visual_cover', True)}")
+        print(f"Week:         {state.get('week_id', current_week_id(now))}")
+        print(f"Last full:    {state.get('last_publish_date', 'never')}")
+        last_shorts = shorts_state.get("last_publish_at", "never")
+        print(f"Last Shorts:  {last_shorts}")
+        if next_shorts:
+            print(f"Next Shorts:  {next_shorts.strftime('%Y-%m-%d %H:%M MSK')}")
+        print(f"Shorts count: {shorts_state.get('publish_count', 0)}")
+        print(f"Next visual:  {shorts_state.get('use_visual_next', True)}")
         print(f"\nWeekly quota / published:")
         for artist, limit in config.get("weekly_quota", {}).items():
             done = state.get("weekly_published", {}).get(artist, 0)
             ready = "ready" if artist_is_ready(artist) else "empty"
             print(f"  {artist}: {done}/{limit} ({ready})")
-        print(f"\nReady artists: {', '.join(get_ready_artists()) or 'none'}")
+        print(f"\nReady full:   {', '.join(get_ready_artists()) or 'none'}")
+        print(f"Ready Shorts: {', '.join(list_shorts_artists()) or 'none'}")
         next_artist = pick_artist(state, config)
-        print(f"Next pick:     {next_artist or 'nothing'}")
+        print(f"Next full:    {next_artist or 'nothing'}")
         sys.exit(0)
 
-    if args.now or args.dry_run:
+    if args.shorts_now:
+        ok = run_shorts_cycle(dry_run=args.dry_run)
+        sys.exit(0 if ok else 1)
+
+    if args.now:
         ok = run_publish_cycle(dry_run=args.dry_run)
         sys.exit(0 if ok else 1)
 
     if args.daemon:
+        config = load_schedule_config()
+        shorts_cfg = load_shorts_settings(config)
         print("BeatMachine Scheduler started")
         print(f"Config: {SCHEDULE_CONFIG}")
-        config = load_schedule_config()
-        print(f"Daily at {config.get('publish_time')} MSK")
+        print(f"Full video daily at {config.get('publish_time')} MSK")
+        print(f"Shorts every {shorts_cfg.get('interval_hours', 2)} hours")
         print(f"Weekly: {config.get('weekly_quota')}")
         print("Press Ctrl+C to stop\n")
         try:
-            wait_until_publish_time()
+            daemon_loop()
         except KeyboardInterrupt:
             print("\nScheduler stopped.")
             sys.exit(0)
