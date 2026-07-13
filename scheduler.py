@@ -14,6 +14,8 @@ from analyzer import find_audio_files
 from renderer import find_images
 from uploader import (
     ARTISTS_DIR,
+    backfill_published_archive,
+    get_published_catalog,
     list_shorts_artists,
     load_artist_config,
     load_shorts_settings,
@@ -372,6 +374,7 @@ def main():
         print(f"Shorts:       every {shorts_cfg.get('interval_hours', 2)}h")
         print(f"Shorts delay: {shorts_cfg.get('delay_minutes', 3)} min after full video")
         print(f"Shorts mode:  alternate visual/cover = {shorts_cfg.get('alternate_visual_cover', True)}")
+        print(f"Shorts source: published full videos = {shorts_cfg.get('use_published_beats', True)}")
         print(f"Week:         {state.get('week_id', current_week_id(now))}")
         print(f"Last full:    {state.get('last_publish_date', 'never')}")
         last_shorts = shorts_state.get("last_publish_at", "never")
@@ -387,6 +390,8 @@ def main():
             print(f"  {artist}: {done}/{limit} ({ready})")
         print(f"\nReady full:   {', '.join(get_ready_artists()) or 'none'}")
         print(f"Ready Shorts: {', '.join(list_shorts_artists()) or 'none'}")
+        for artist in list_shorts_artists():
+            print(f"  published archive {artist}: {len(get_published_catalog(artist))} beat(s)")
         next_artist = pick_artist(state, config)
         print(f"Next full:    {next_artist or 'nothing'}")
         sys.exit(0)
@@ -402,6 +407,9 @@ def main():
     if args.daemon:
         config = load_schedule_config()
         shorts_cfg = load_shorts_settings(config)
+        backfilled = backfill_published_archive()
+        if backfilled:
+            print(f"Backfilled {backfilled} beat(s) into published archive")
         print("BeatMachine Scheduler started")
         print(f"Config: {SCHEDULE_CONFIG}")
         print(f"Full video daily at {config.get('publish_time')} MSK")

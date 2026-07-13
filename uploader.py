@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import shutil
 import sys
 import time
 from datetime import datetime, timezone
@@ -66,6 +67,10 @@ def load_shorts_settings(config: dict) -> dict:
         "alternate_visual_cover": config.get(
             "shorts_alternate_visual_cover",
             global_shorts.get("alternate_visual_cover", True),
+        ),
+        "use_published_beats": config.get(
+            "shorts_use_published_beats",
+            global_shorts.get("use_published_beats", True),
         ),
         "tiktok": config.get("tiktok_enabled", global_social.get("tiktok", False)),
         "reels": config.get("reels_enabled", global_social.get("reels", False)),
@@ -219,16 +224,92 @@ def cleanup_after_publish(
 
 
 def find_full_video_url(artist: str, audio_path: Path) -> str:
+    for entry in get_published_catalog(artist):
+        if entry["audio_path"].name == audio_path.name:
+            return entry["full_video_url"]
+    return ""
+
+
+def published_beats_dir(artist_dir: Path) -> Path:
+    return artist_dir / "published" / "beats"
+
+
+def published_images_dir(artist_dir: Path) -> Path:
+    return artist_dir / "published" / "images"
+
+
+def archive_published_for_shorts(artist_dir: Path, audio_path: Path, image_path: Path) -> None:
+    """Keep beat + cover for interval Shorts after full video publish."""
+    beats_dir = published_beats_dir(artist_dir)
+    images_dir = published_images_dir(artist_dir)
+    beats_dir.mkdir(parents=True, exist_ok=True)
+    images_dir.mkdir(parents=True, exist_ok=True)
+
+    beat_dest = beats_dir / audio_path.name
+    if not beat_dest.exists():
+        shutil.copy2(audio_path, beat_dest)
+
+    cover_dest = images_dir / f"{audio_path.stem}{image_path.suffix.lower()}"
+    if not cover_dest.exists():
+        shutil.copy2(image_path, cover_dest)
+
+    print(f"    Archived for interval Shorts: {audio_path.name}")
+
+
+def get_published_catalog(artist: str) -> list[dict]:
+    """Full videos already on YouTube with archived audio on disk."""
     if not UPLOAD_LOG.exists():
-        return ""
-    for entry in reversed(json.loads(UPLOAD_LOG.read_text())):
+        return []
+
+    artist_dir = ARTISTS_DIR / artist
+    beats_dir = published_beats_dir(artist_dir)
+    seen: set[str] = set()
+    catalog: list[dict] = []
+
+    for entry in json.loads(UPLOAD_LOG.read_text()):
         if entry.get("type") in ("shorts", "shorts_interval"):
             continue
-        if entry.get("artist") == artist and entry.get("audio_file") == audio_path.name:
-            video_id = entry.get("video_id")
-            if video_id:
-                return f"https://youtu.be/{video_id}"
-    return ""
+        if entry.get("artist") != artist:
+            continue
+
+        audio_file = entry.get("audio_file")
+        video_id = entry.get("video_id")
+        title = entry.get("title")
+        if not audio_file or not video_id or not title:
+            continue
+        if audio_file in seen:
+            continue
+
+        audio_path = beats_dir / audio_file
+        if not audio_path.is_file():
+            continue
+
+        seen.add(audio_file)
+        catalog.append({
+            "artist": artist,
+            "audio_file": audio_file,
+            "audio_path": audio_path,
+            "title": title,
+            "video_id": video_id,
+            "full_video_url": f"https://youtu.be/{video_id}",
+            "youtube_title": entry.get("youtube_title", ""),
+        })
+
+    return catalog
+
+
+def find_published_cover(artist_dir: Path, audio_path: Path) -> Path | None:
+    images_dir = published_images_dir(artist_dir)
+    if not images_dir.is_dir():
+        return None
+
+    for ext in (".png", ".jpg", ".jpeg", ".webp", ".bmp"):
+        candidate = images_dir / f"{audio_path.stem}{ext}"
+        if candidate.is_file():
+            return candidate
+
+    images = find_images(images_dir)
+    return images[0] if images else None
 
 
 def render_shorts_clip(
@@ -404,27 +485,24 @@ def upload_shorts_clip(
     }
 
 
-def artist_can_shorts(artist_name: str, mode: str) -> bool:
+def artist_can_interval_shorts(artist_name: str, mode: str) -> bool:
+    if not get_published_catalog(artist_name):
+        return False
+
     artist_dir = ARTISTS_DIR / artist_name
-    if not artist_dir.is_dir():
-        return False
-    config = load_artist_config(artist_dir)
-    has_beats = bool(find_audio_files(artist_dir / "beats"))
-    has_titles = bool(load_titles(artist_dir, config))
-    if not (has_beats and has_titles):
-        return False
     if mode == "visual":
         return bool(find_visuals(artist_dir / "visuals"))
-    return bool(find_images(artist_dir / "image"))
+    return bool(find_images(published_images_dir(artist_dir)))
 
 
 def list_shorts_artists() -> list[str]:
+    """Artists with published full videos archived for interval Shorts."""
     if not ARTISTS_DIR.is_dir():
         return []
     artists = sorted(d.name for d in ARTISTS_DIR.iterdir() if d.is_dir())
     return [
         name for name in artists
-        if artist_can_shorts(name, "visual") or artist_can_shorts(name, "cover")
+        if artist_can_interval_shorts(name, "visual") or artist_can_interval_shorts(name, "cover")
     ]
 
 
@@ -433,7 +511,6 @@ def pick_interval_shorts_target(
     artist_index: int,
     publish_count: int,
     prefer_visual: bool,
-    alternate: bool,
 ) -> tuple[str, str, int] | None:
     artists = list_shorts_artists()
     if not artists:
@@ -445,10 +522,10 @@ def pick_interval_shorts_target(
     for offset in range(len(artists)):
         idx = (start + offset) % len(artists)
         artist = artists[idx]
-        if artist_can_shorts(artist, preferred_mode):
+        if artist_can_interval_shorts(artist, preferred_mode):
             return artist, preferred_mode, idx
         fallback = "cover" if preferred_mode == "visual" else "visual"
-        if artist_can_shorts(artist, fallback):
+        if artist_can_interval_shorts(artist, fallback):
             return artist, fallback, idx
 
     return None
@@ -462,19 +539,22 @@ def publish_interval_shorts(
     dry_run: bool = False,
     use_audio_analysis: bool = False,
 ) -> dict | None:
-    """Upload a Shorts clip every N hours — rotates artists and visual/cover."""
+    """Upload interval Shorts from already published beats (with full video link)."""
     global_shorts = load_shorts_settings({})
     if not global_shorts["enabled"]:
+        return None
+
+    if not global_shorts.get("use_published_beats", True):
+        print("  Interval Shorts require published beats (shorts.use_published_beats)")
         return None
 
     target = pick_interval_shorts_target(
         artist_index=artist_index,
         publish_count=publish_count,
         prefer_visual=prefer_visual,
-        alternate=global_shorts.get("alternate_visual_cover", True),
     )
     if not target:
-        print("  No content ready for interval Shorts")
+        print("  No published beats ready for interval Shorts")
         return None
 
     artist, mode, picked_index = target
@@ -482,16 +562,16 @@ def publish_interval_shorts(
     config = load_artist_config(artist_dir)
     shorts = load_shorts_settings(config)
 
-    audio_files = find_audio_files(artist_dir / "beats")
-    images = find_images(artist_dir / "image")
-    titles = load_titles(artist_dir, config)
-    if not audio_files or not titles:
+    catalog = get_published_catalog(artist)
+    if not catalog:
         return None
 
     slot = publish_count
-    audio_path = audio_files[slot % len(audio_files)]
-    title = titles[slot % len(titles)]
-    image_path = images[slot % len(images)] if images else None
+    entry = catalog[slot % len(catalog)]
+    audio_path = entry["audio_path"]
+    title = entry["title"]
+    full_video_url = entry["full_video_url"]
+    image_path = find_published_cover(artist_dir, audio_path)
 
     visual_path = None
     if mode == "visual":
@@ -514,21 +594,22 @@ def publish_interval_shorts(
     )
     tags_line = load_tags_line(artist_dir, config)
     api_tags = config.get("tags", [])
-    full_video_url = find_full_video_url(artist, audio_path)
 
-    print(f"  [{artist}] interval Shorts \"{title}\" ({mode})")
+    print(f"  [{artist}] interval Shorts \"{title}\" ({mode}, published)")
     print(f"    Audio: {audio_path.name}")
+    print(f"    Full:  {full_video_url}")
     if mode == "visual" and visual_path:
         print(f"    Visual: {visual_path.name}")
     elif image_path:
         print(f"    Cover: {image_path.name}")
 
     if dry_run:
-        print("    [dry-run] Would upload interval Shorts (files kept)")
+        print("    [dry-run] Would upload interval Shorts (archived files kept)")
         return {
             "artist": artist,
             "title": title,
             "mode": mode,
+            "full_video_url": full_video_url,
             "artist_index": picked_index,
             "next_prefer_visual": not prefer_visual if shorts.get("alternate_visual_cover", True) else prefer_visual,
         }
@@ -552,6 +633,7 @@ def publish_interval_shorts(
         use_visual=mode == "visual",
         log_type="shorts_interval",
         log_key_suffix=f"shorts_interval_{slot}",
+        full_video_id=entry.get("video_id"),
     )
     if not result:
         return None
@@ -562,9 +644,50 @@ def publish_interval_shorts(
         "title": title,
         "mode": result["mode"],
         "shorts_video_id": result["video_id"],
+        "full_video_url": full_video_url,
         "artist_index": picked_index,
         "next_prefer_visual": not prefer_visual if shorts.get("alternate_visual_cover", True) else prefer_visual,
     }
+
+
+def backfill_published_archive() -> int:
+    """Copy still-available beats/covers into published/ for past full uploads."""
+    if not UPLOAD_LOG.exists():
+        return 0
+
+    copied = 0
+    for entry in json.loads(UPLOAD_LOG.read_text()):
+        if entry.get("type") in ("shorts", "shorts_interval"):
+            continue
+
+        artist = entry.get("artist")
+        audio_file = entry.get("audio_file")
+        video_id = entry.get("video_id")
+        image_file = entry.get("image_file")
+        if not artist or not audio_file or not video_id:
+            continue
+
+        artist_dir = ARTISTS_DIR / artist
+        if not artist_dir.is_dir():
+            continue
+
+        beat_dest = published_beats_dir(artist_dir) / audio_file
+        if not beat_dest.exists():
+            beat_src = artist_dir / "beats" / audio_file
+            if beat_src.is_file():
+                beat_dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(beat_src, beat_dest)
+                copied += 1
+
+        if image_file:
+            cover_dest = published_images_dir(artist_dir) / f"{Path(audio_file).stem}{Path(image_file).suffix.lower()}"
+            if not cover_dest.exists():
+                cover_src = artist_dir / "image" / image_file
+                if cover_src.is_file():
+                    cover_dest.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(cover_src, cover_dest)
+
+    return copied
 
 
 def publish_single_beat(
@@ -680,6 +803,7 @@ def publish_single_beat(
             "beat_name": metadata.beat_name,
             "title": title,
             "audio_file": audio_path.name,
+            "image_file": image_path.name,
             "video_id": video_id,
             "youtube_title": youtube_title,
             "uploaded_at": datetime.now(timezone.utc).isoformat(),
@@ -717,6 +841,8 @@ def publish_single_beat(
     archive_title(artist_dir, config, title, video_id=video_id)
     remove_first_title(artist_dir, config, title)
     print(f"    Archived title: {title}")
+    if video_id:
+        archive_published_for_shorts(artist_dir, audio_path, image_path)
     cleanup_after_publish(audio_path, image_path, video_path, visual_path)
 
     return {

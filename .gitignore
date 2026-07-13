@@ -15,6 +15,8 @@ artists/*/image/*
 !artists/*/image/.gitkeep
 artists/*/visuals/*
 !artists/*/visuals/.gitkeep
+artists/*/published/**/*
+!artists/*/published/**/.gitkeep
 **/preview.json
 
 # Python
