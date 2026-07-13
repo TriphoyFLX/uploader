@@ -157,12 +157,96 @@ def upload_key(artist: str, audio_path: Path, title: str) -> str:
     return f"{artist}:{audio_path.name}:{title}"
 
 
-def is_already_uploaded(artist: str, audio_path: Path, title: str) -> bool:
+def load_upload_entries() -> list[dict]:
     if not UPLOAD_LOG.exists():
-        return False
-    entries = json.loads(UPLOAD_LOG.read_text())
+        return []
+    return json.loads(UPLOAD_LOG.read_text())
+
+
+def get_full_upload_entries(artist: str | None = None) -> list[dict]:
+    entries = []
+    for entry in load_upload_entries():
+        if entry.get("type") in ("shorts", "shorts_interval"):
+            continue
+        if not entry.get("video_id"):
+            continue
+        if artist and entry.get("artist") != artist:
+            continue
+        entries.append(entry)
+    return entries
+
+
+def published_audio_files(artist: str) -> set[str]:
+    return {
+        entry["audio_file"]
+        for entry in get_full_upload_entries(artist)
+        if entry.get("audio_file")
+    }
+
+
+def used_full_titles(artist: str) -> set[str]:
+    return {
+        entry["title"].strip().lower()
+        for entry in get_full_upload_entries(artist)
+        if entry.get("title")
+    }
+
+
+def is_audio_already_published(artist: str, audio_name: str) -> bool:
+    return audio_name in published_audio_files(artist)
+
+
+def is_title_already_used(artist: str, title: str) -> bool:
+    return title.strip().lower() in used_full_titles(artist)
+
+
+def is_already_uploaded(artist: str, audio_path: Path, title: str) -> bool:
+    if is_audio_already_published(artist, audio_path.name):
+        return True
+    entries = load_upload_entries()
     key = upload_key(artist, audio_path, title)
     return any(e.get("key") == key for e in entries)
+
+
+def prune_publish_queue(artist_dir: Path, config: dict) -> None:
+    """Drop beats/titles that were already used for full YouTube uploads."""
+    artist = artist_dir.name
+    published = published_audio_files(artist)
+    used_titles = used_full_titles(artist)
+
+    for beat in find_audio_files(artist_dir / "beats"):
+        if beat.name in published:
+            beat.unlink()
+            print(f"    Removed already-published beat: {beat.name}")
+
+    titles = load_titles(artist_dir, config)
+    fresh_titles = [t for t in titles if t.strip().lower() not in used_titles]
+    if len(fresh_titles) != len(titles):
+        removed = len(titles) - len(fresh_titles)
+        save_titles(artist_dir, config, fresh_titles)
+        print(f"    Removed {removed} already-used title(s) from queue")
+
+
+def pick_publish_assets(
+    artist_dir: Path,
+    config: dict,
+) -> tuple[Path, Path, str] | None:
+    artist = artist_dir.name
+    prune_publish_queue(artist_dir, config)
+
+    audio_files = find_audio_files(artist_dir / "beats")
+    images = find_images(artist_dir / "image")
+    titles = load_titles(artist_dir, config)
+    published = published_audio_files(artist)
+    used_titles = used_full_titles(artist)
+
+    audio_path = next((f for f in audio_files if f.name not in published), None)
+    title = next((t for t in titles if t.strip().lower() not in used_titles), None)
+    if not audio_path or not images or not title:
+        return None
+
+    image_path = images[0]
+    return audio_path, image_path, title
 
 
 def save_titles(artist_dir: Path, config: dict, titles: list[str]) -> None:
@@ -701,23 +785,19 @@ def publish_single_beat(
     artist = artist_dir.name
     config = load_artist_config(artist_dir)
 
-    audio_files = find_audio_files(artist_dir / "beats")
-    images = find_images(artist_dir / "image")
-    titles = load_titles(artist_dir, config)
-
-    if not audio_files:
-        print(f"  [{artist}] No beats")
-        return None
-    if not images:
-        print(f"  [{artist}] No images")
-        return None
-    if not titles:
-        print(f"  [{artist}] No titles in titles.txt")
+    picked = pick_publish_assets(artist_dir, config)
+    if not picked:
+        print(f"  [{artist}] No unpublished beat/image/title ready")
         return None
 
-    audio_path = audio_files[0]
-    image_path = images[0]
-    title = titles[0]
+    audio_path, image_path, title = picked
+
+    if is_audio_already_published(artist, audio_path.name):
+        print(f"  [{artist}] Beat already published — skip: {audio_path.name}")
+        return None
+    if is_title_already_used(artist, title):
+        print(f"  [{artist}] Title already used — skip: {title}")
+        return None
 
     visual_path = None
     shorts_settings = load_shorts_settings(config)
