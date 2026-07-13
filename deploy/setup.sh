@@ -7,7 +7,7 @@ REPO="https://github.com/TriphoyFLX/uploader.git"
 
 echo "==> Installing system packages..."
 apt-get update -qq
-apt-get install -y -qq python3 python3-venv python3-pip ffmpeg git
+apt-get install -y -qq python3 python3-venv python3-pip ffmpeg git librsvg2-bin
 
 echo "==> Setting up app in ${APP_DIR}..."
 if [ -d "$APP_DIR/.git" ]; then
